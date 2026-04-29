@@ -155,6 +155,11 @@ class EmbodimentTag(Enum):
 
     YAM = "yam"
 
+    GEN3_LITE = "gen3_lite"
+    """
+    Kinova Gen3 Lite 6-DOF arm with integrated 2-finger gripper.
+    """
+
     DREAM = "dream"
     """
     The datasets with DREAM actions.
