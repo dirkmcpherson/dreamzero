@@ -203,9 +203,13 @@ def build_modality_json(
         modality["video"][short_name] = {"original_key": vk}
 
     # --- Annotation ---
+    # LeRobot v2 stores task strings in meta/tasks.jsonl with a numeric
+    # task_index column in the parquet. The DreamZero loader detects numeric
+    # columns and resolves them via tasks.jsonl, so point original_key at
+    # task_index rather than a non-existent annotation column.
     if task_key:
         short = task_key.replace("annotation.", "")
-        modality["annotation"][short] = {"original_key": task_key}
+        modality["annotation"][short] = {"original_key": "task_index"}
     else:
         for ak in detected["annotation"]:
             short = ak.replace("annotation.", "")
