@@ -82,4 +82,5 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     tokenizer_path=$TOKENIZER_DIR \
     pretrained_model_path=./checkpoints/DreamZero-AgiBot \
     ++action_head_cfg.config.skip_component_loading=true \
-    ++action_head_cfg.config.defer_lora_injection=true
+    ++action_head_cfg.config.defer_lora_injection=true \
+    "$@"
