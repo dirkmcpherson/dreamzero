@@ -39,6 +39,7 @@ class Args:
     enable_dit_cache: bool = False
     index: int = 0
     max_chunk_size: int | None = None  # If None, use config value. Otherwise override max_chunk_size for inference.
+    embodiment_tag: str = "oxe_droid"
 
 
 class ARDroidRoboarenaPolicy:
@@ -748,7 +749,7 @@ def main(args: Args) -> None:
     # to autoregressive nature of the model (several possible shapes).
     torch._dynamo.config.recompile_limit = 800
 
-    embodiment_tag = "oxe_droid"
+    embodiment_tag = args.embodiment_tag
     model_path = args.model_path
     policy_metadata = {
         "embodiment": embodiment_tag,
