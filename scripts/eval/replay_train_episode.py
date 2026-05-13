@@ -168,10 +168,14 @@ def build_camera_mapping(
             raise RuntimeError("Server wants wrist cam but none found in dataset")
         obs_key_to_path["observation/wrist_image_left"] = dataset_cams[wrist_cams[0]]
 
+    if not ext_cams and n_ext > 0:
+        raise RuntimeError(f"Server wants {n_ext} external cams, dataset has 0")
     for i in range(n_ext):
+        # If dataset has fewer ext cams than server expects, cycle (duplicate) the available ones.
+        src = ext_cams[i % len(ext_cams)]
+        obs_key_to_path[f"observation/exterior_image_{i}_left"] = dataset_cams[src]
         if i >= len(ext_cams):
-            raise RuntimeError(f"Server wants {n_ext} external cams, dataset has {len(ext_cams)}")
-        obs_key_to_path[f"observation/exterior_image_{i}_left"] = dataset_cams[ext_cams[i]]
+            logging.warning(f"Duplicating ext cam {src!r} into slot {i} (dataset has only {len(ext_cams)})")
 
     return obs_key_to_path
 
