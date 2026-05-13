@@ -60,16 +60,23 @@ class ARDroidRoboarenaPolicy:
         groot_policy: GrootSimPolicy,
         signal_group: dist.ProcessGroup,
         output_dir: str | None = None,
+        image_key_mapping: dict[str, str] | None = None,
     ) -> None:
         self._policy = groot_policy
         self._signal_group = signal_group
         self._output_dir = output_dir
-        
-        # Frame buffers for accumulation (per camera view)
+
+        # Mapping from roboarena obs keys to the internal video.* keys the model expects.
+        # Defaults to DROID-style names. For other embodiments (e.g. gen3_lite) pass a custom mapping.
+        self._image_key_mapping = image_key_mapping or {
+            "observation/exterior_image_0_left": "video.exterior_image_1_left",
+            "observation/exterior_image_1_left": "video.exterior_image_2_left",
+            "observation/wrist_image_left": "video.wrist_image_left",
+        }
+
+        # Frame buffers for accumulation (per camera view) — keys are the target video.* names.
         self._frame_buffers: dict[str, list[np.ndarray]] = {
-            "video.exterior_image_1_left": [],
-            "video.exterior_image_2_left": [],
-            "video.wrist_image_left": [],
+            v: [] for v in self._image_key_mapping.values()
         }
         self._call_count = 0
         self._is_first_call = True
@@ -106,13 +113,9 @@ class ARDroidRoboarenaPolicy:
         """
         converted = {}
         
-        # Map image keys (roboarena uses 0-indexed, AR_droid uses 1-indexed)
-        image_key_mapping = {
-            "observation/exterior_image_0_left": "video.exterior_image_1_left",
-            "observation/exterior_image_1_left": "video.exterior_image_2_left",
-            "observation/wrist_image_left": "video.wrist_image_left",
-        }
-        
+        # Map image keys (configurable per embodiment via __init__)
+        image_key_mapping = self._image_key_mapping
+
         # Accumulate frames for each camera view
         for roboarena_key, droid_key in image_key_mapping.items():
             if roboarena_key in obs:
@@ -405,7 +408,7 @@ class WebsocketPolicyServer:
         except Exception:
             return
 
-        for key in ("video.exterior_image_1_left", "video.exterior_image_2_left", "video.wrist_image_left"):
+        for key in self._frame_buffers.keys():
             if key not in obs:
                 continue
             value = obs[key]
@@ -789,18 +792,30 @@ def main(args: Args) -> None:
         output_dir = None
         logging.info(f"Rank {rank} starting as worker for distributed inference...")
     
+    # Per-embodiment mapping from roboarena obs keys to internal video.* keys.
+    # DROID expects 2 external + 1 wrist with verbose names; gen3_lite uses short names.
+    if embodiment_tag == "gen3_lite":
+        image_key_mapping = {
+            "observation/exterior_image_0_left": "video.exterior",
+            "observation/wrist_image_left": "video.wrist",
+        }
+    else:
+        image_key_mapping = None  # fall back to wrapper default (DROID-style)
+
     # Create wrapper policy that converts between roboarena and AR_droid formats
     wrapper_policy = ARDroidRoboarenaPolicy(
         groot_policy=policy,
         signal_group=signal_group,
         output_dir=output_dir,
+        image_key_mapping=image_key_mapping,
     )
     
-    # Configure server for AR_droid (2 external cameras, wrist camera, joint position actions)
+    # Configure server based on embodiment.
+    n_external_cameras = 1 if embodiment_tag == "gen3_lite" else 2
     server_config = PolicyServerConfig(
         image_resolution=(180, 320),  # AR_droid expects 180x320 images
         needs_wrist_camera=True,
-        n_external_cameras=2,
+        n_external_cameras=n_external_cameras,
         needs_stereo_camera=False,
         needs_session_id=True,  # Track session to reset state for new clients
         action_space="joint_position",
