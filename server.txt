@@ -1,0 +1,21 @@
+  TORCH_COMPILE_DISABLE=1 torchrun --standalone --nproc_per_node=1 \
+      socket_test_optimized_AR.py \
+      --port 8000 \
+      --enable-dit-cache \
+      --embodiment-tag gen3_lite \
+      --model-path ./checkpoints/dreamzero_gen3_lite_lora/checkpoint-5000
+
+  Then re-run the client. With the new server config (n_external_cameras=1), the camera mapping will be 1:1 — no duplication warning:
+
+  python scripts/eval/replay_train_episode.py \
+      --data-root ../lerobot_data/kinova_gen3_lite_smoke_v2 \
+      --episode 0 \
+      --num-chunks 3 \
+      --out-dir ./eval_replay \
+      --prompt-override "pick up the block"
+
+  Expected output now:
+  - Server config: n_external_cameras=1, needs_wrist_camera=True
+  - Camera mapping: wrist_image_left <- episode_000000.mp4 and exterior_image_0_left <- episode_000000.mp4
+  - Per-chunk RMSE numbers
+  - Predicted video at ./checkpoints/dreamzero_gen3_lite_lora/checkpoint-5000/real_world_eval_gen_*/
