@@ -104,6 +104,15 @@ def find_episode_videos(data_root: Path, episode_idx: int) -> dict[str, Path]:
     return cam_files
 
 
+def _find_episode_parquet(data_root: Path, episode_idx: int) -> Path | None:
+    chunk_idx = episode_idx // 1000
+    pq_path = data_root / "data" / f"chunk-{chunk_idx:03d}" / f"episode_{episode_idx:06d}.parquet"
+    if pq_path.exists():
+        return pq_path
+    candidates = list((data_root / "data").rglob(f"episode_{episode_idx:06d}.parquet"))
+    return candidates[0] if candidates else None
+
+
 def load_episode_actions(data_root: Path, episode_idx: int) -> np.ndarray | None:
     """Load ground truth actions from the parquet shard. Returns (T, A) or None on failure."""
     try:
@@ -112,14 +121,10 @@ def load_episode_actions(data_root: Path, episode_idx: int) -> np.ndarray | None
         logging.warning("pyarrow not installed — skipping GT action loading")
         return None
 
-    chunk_idx = episode_idx // 1000
-    pq_path = data_root / "data" / f"chunk-{chunk_idx:03d}" / f"episode_{episode_idx:06d}.parquet"
-    if not pq_path.exists():
-        candidates = list((data_root / "data").rglob(f"episode_{episode_idx:06d}.parquet"))
-        if not candidates:
-            logging.warning(f"No parquet for episode {episode_idx}")
-            return None
-        pq_path = candidates[0]
+    pq_path = _find_episode_parquet(data_root, episode_idx)
+    if pq_path is None:
+        logging.warning(f"No parquet for episode {episode_idx}")
+        return None
 
     table = pq.read_table(pq_path)
     cols = table.column_names
@@ -128,6 +133,37 @@ def load_episode_actions(data_root: Path, episode_idx: int) -> np.ndarray | None
         logging.warning(f"No 'action' column in {pq_path}; cols={cols}")
         return None
     arr = np.asarray(table[action_col].to_pylist(), dtype=np.float32)
+    return arr
+
+
+def load_episode_state(data_root: Path, episode_idx: int) -> np.ndarray | None:
+    """Load per-frame observation.state (T, S) from the parquet shard, or None on failure.
+
+    For gen3_lite the state column is 7-dim: 6 joints + 1 gripper.
+    """
+    try:
+        import pyarrow.parquet as pq  # type: ignore
+    except ImportError:
+        logging.warning("pyarrow not installed — cannot load real state, will fall back to zeros")
+        return None
+
+    pq_path = _find_episode_parquet(data_root, episode_idx)
+    if pq_path is None:
+        logging.warning(f"No parquet for episode {episode_idx} — falling back to zero state")
+        return None
+
+    table = pq.read_table(pq_path)
+    cols = table.column_names
+    state_col = next(
+        (c for c in cols if c == "observation.state" or c.endswith(".observation.state")),
+        None,
+    )
+    if state_col is None:
+        logging.warning(
+            f"No 'observation.state' column in {pq_path}; cols={cols} — falling back to zeros"
+        )
+        return None
+    arr = np.asarray(table[state_col].to_pylist(), dtype=np.float32)
     return arr
 
 
@@ -188,6 +224,7 @@ def build_obs(
     prompt: str,
     session_id: str,
     state_dim: int,
+    episode_state: np.ndarray | None = None,
 ) -> dict:
     obs: dict = {}
     for cam_key, frames in camera_frames.items():
@@ -195,9 +232,24 @@ def build_obs(
         if len(frame_indices) == 1:
             selected = selected[0]
         obs[cam_key] = selected
-    obs["observation/joint_position"] = np.zeros(state_dim, dtype=np.float32)
+
+    anchor = frame_indices[-1]
+    if episode_state is not None:
+        anchor_idx = min(anchor, episode_state.shape[0] - 1)
+        full_state = episode_state[anchor_idx]
+        # gen3_lite layout: state[:state_dim] = joints, state[state_dim:state_dim+1] = gripper
+        joints = full_state[:state_dim].astype(np.float32)
+        if full_state.shape[0] > state_dim:
+            gripper = full_state[state_dim:state_dim + 1].astype(np.float32)
+        else:
+            gripper = np.zeros(1, dtype=np.float32)
+    else:
+        joints = np.zeros(state_dim, dtype=np.float32)
+        gripper = np.zeros(1, dtype=np.float32)
+
+    obs["observation/joint_position"] = joints
     obs["observation/cartesian_position"] = np.zeros(6, dtype=np.float32)
-    obs["observation/gripper_position"] = np.zeros(1, dtype=np.float32)
+    obs["observation/gripper_position"] = gripper
     obs["prompt"] = prompt
     obs["session_id"] = session_id
     return obs
@@ -211,10 +263,13 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--num-chunks", type=int, default=3)
     p.add_argument("--out-dir", default="./eval_replay")
-    p.add_argument("--state-dim", type=int, default=7,
-                   help="Length of observation/joint_position vector to send (7 = 6-dof + gripper-pad).")
+    p.add_argument("--state-dim", type=int, default=6,
+                   help="Length of observation/joint_position vector to send (6 for gen3_lite, 7 for DROID).")
     p.add_argument("--prompt-override", default=None,
                    help="Override the language prompt (default: use episode's task string).")
+    p.add_argument("--zero-state", action="store_true",
+                   help="Send zeros for joint/gripper state (legacy behavior). "
+                        "Defaults to real state from the parquet.")
     args = p.parse_args()
 
     data_root = Path(args.data_root).resolve()
@@ -232,6 +287,16 @@ def main() -> None:
     if gt_actions is not None:
         logging.info(f"Ground truth actions: shape={gt_actions.shape}, "
                      f"range=[{gt_actions.min():.3f}, {gt_actions.max():.3f}]")
+
+    if args.zero_state:
+        logging.warning("Using zero state (--zero-state set). Model was trained on real state; "
+                        "expect garbage predictions.")
+        episode_state = None
+    else:
+        episode_state = load_episode_state(data_root, args.episode)
+        if episode_state is not None:
+            logging.info(f"Real state: shape={episode_state.shape}, "
+                         f"range=[{episode_state.min():.3f}, {episode_state.max():.3f}]")
 
     # ---- 2. Connect to server ----
     logging.info(f"Connecting to {args.host}:{args.port}...")
@@ -257,7 +322,7 @@ def main() -> None:
     anchor_frames: list[int] = []
 
     # Initial: single frame at index 0
-    obs = build_obs(camera_frames, [0], prompt, session_id, args.state_dim)
+    obs = build_obs(camera_frames, [0], prompt, session_id, args.state_dim, episode_state)
     t0 = time.time()
     actions = client.infer(obs)
     logging.info(f"[init  ] frame 0 -> action {actions.shape} "
@@ -271,7 +336,7 @@ def main() -> None:
         if indices[-1] >= total_frames:
             logging.info(f"Hit end of episode at chunk {chunk_idx}, stopping")
             break
-        obs = build_obs(camera_frames, indices, prompt, session_id, args.state_dim)
+        obs = build_obs(camera_frames, indices, prompt, session_id, args.state_dim, episode_state)
         t0 = time.time()
         actions = client.infer(obs)
         logging.info(f"[chunk {chunk_idx}] anchor={current} -> action {actions.shape} "
